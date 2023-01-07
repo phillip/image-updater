@@ -36,24 +36,36 @@ import (
 
 // rootCmd represents the base command when called without any subcommands
 var rootCmd = &cobra.Command{
-	Use:   "image-updater",
-	Short: "A brief description of your application",
-	Long: `A longer description that spans multiple lines and likely contains
-examples and usage of using your application. For example:
+	Use:   "image-updater <github_owner>/<github_repo_name>/<file_path> <new_tag>",
+	Args:  cobra.ExactArgs(2),
+	Short: "Tool to update image tags in Kubernetes manifests",
+	Long: `Tool to update image tags in Kubernetes manifests
 
-Cobra is a CLI library for Go that empowers applications.
-This application is a tool to generate the needed files
-to quickly create a Cobra application.`,
+Example:
+	image-updater -l tag phillip/image-updater-test/values.yaml v0.2`,
 	// Uncomment the following line if your bare application
 	// has an action associated with it:
 	Run: func(cmd *cobra.Command, args []string) {
+		githubToken := os.Getenv("GITHUB_TOKEN")
+		if githubToken == "" {
+			fmt.Fprintf(os.Stderr, "Error: %v", "GITHUB_TOKEN must be set in the shell environment.")
+			os.Exit(1)
+		}
+
+		if !strings.Contains(args[0], "/") {
+			fmt.Fprintf(os.Stderr, "Error: %v", "github_file_path must be <github_owner>/<github_repository>/<file_path_in_repo>")
+			os.Exit(1)
+		}
+
 		parts := strings.Split(args[0], "/")
 		owner := parts[0]
 		repo := parts[1]
-		label, _ := cmd.Flags().GetString("label")
 		filePath := strings.Join(parts[2:], "/")
+		label, _ := cmd.Flags().GetString("label")
 		newTag := args[1]
 		branchName, _ := cmd.Flags().GetString("branch")
+		nth, _ := cmd.Flags().GetInt("nth")
+		message, _ := cmd.Flags().GetString("message")
 
 		variables := map[string]interface{}{
 			"owner":    githubv4.String(owner),
@@ -61,7 +73,7 @@ to quickly create a Cobra application.`,
 			"filePath": githubv4.String("HEAD:" + filePath),
 		}
 
-		client := getClient()
+		client := getClient(githubToken)
 
 		testLogin, _ := cmd.Flags().GetBool("testLogin")
 		if testLogin {
@@ -69,13 +81,17 @@ to quickly create a Cobra application.`,
 		} else {
 			content := getFileContent(client, variables)
 
-			// fmt.Printf(content + "\n\n\n")
+			newContent := replaceTag(content, label, newTag, nth)
 
-			newContent := replaceTag(content, label, newTag)
-
-			// fmt.Println(newContent)
 			delete(variables, "filePath")
-			updateFile(client, variables, branchName, filePath, newContent)
+			commitMessage := ""
+			if message != "" {
+				commitMessage = message
+			} else {
+				commitMessage = "Updated " + label + " to " + newTag + " in " + filePath
+			}
+
+			updateFile(client, variables, branchName, filePath, newContent, commitMessage)
 		}
 	},
 }
@@ -84,9 +100,7 @@ to quickly create a Cobra application.`,
 // This is called by main.main(). It only needs to happen once to the rootCmd.
 func Execute() {
 	err := rootCmd.Execute()
-	if err != nil {
-		os.Exit(1)
-	}
+	handleError(err)
 }
 
 func init() {
@@ -98,14 +112,17 @@ func init() {
 
 	// Cobra also supports local flags, which will only run
 	// when this action is called directly.
-	rootCmd.Flags().StringP("label", "l", "image", "Yaml label to update the image tag value")
 	rootCmd.Flags().StringP("branch", "b", "main", "Branch for changes")
+	rootCmd.Flags().StringP("label", "l", "image", "Yaml label to update the image tag value")
+	rootCmd.Flags().StringP("message", "m", "", "The commit message for the tag change")
+	rootCmd.Flags().IntP("nth", "n", 1, "The nth occurance of the label to update")
 	rootCmd.Flags().BoolP("testLogin", "", false, "Test GITHUB_TOKEN")
+
 }
 
-func getClient() *githubv4.Client {
+func getClient(githubToken string) *githubv4.Client {
 	src := oauth2.StaticTokenSource(
-		&oauth2.Token{AccessToken: os.Getenv("GITHUB_TOKEN")},
+		&oauth2.Token{AccessToken: githubToken},
 	)
 	httpClient := oauth2.NewClient(context.Background(), src)
 
@@ -123,10 +140,8 @@ func getLoginTest(client *githubv4.Client) {
 	}
 
 	err := client.Query(context.Background(), &query, nil)
-	if err != nil {
-		// Handle error.
-		fmt.Println("Error!! ", err)
-	}
+	handleError(err)
+
 	fmt.Println("    Login:", query.Viewer.Login)
 	fmt.Println("CreatedAt:", query.Viewer.CreatedAt)
 }
@@ -145,20 +160,21 @@ func getFileContent(client *githubv4.Client, variables map[string]interface{}) s
 	}
 
 	err := client.Query(context.Background(), &q, variables)
-	if err != nil {
-		// Handle error.
-		fmt.Println("Error!! ", err)
-	}
-	// fmt.Println(q.Repository.File.Blob.Text)
+	handleError(err)
 	return string(q.Repository.File.Blob.Text)
 }
 
-func replaceTag(content string, label string, newValue string) string {
+func replaceTag(content string, label string, newValue string, nth int) string {
 	re := regexp.MustCompile(label + ":\\s?(\\S+)")
+	check := re.FindAllString(content, -1)
+	if len(check) < nth {
+		fmt.Fprintf(os.Stderr, "Error: File does not contain nth:%d occurances of label.", nth)
+		os.Exit(1)
+	}
 
 	counter := 0
 	output := re.ReplaceAllStringFunc(content, func(value string) string {
-		if counter == 1 {
+		if counter == nth {
 			return value
 		}
 
@@ -175,7 +191,7 @@ func replaceTag(content string, label string, newValue string) string {
 	return output
 }
 
-func updateFile(client *githubv4.Client, variables map[string]interface{}, branchName string, filePath string, newContent string) {
+func updateFile(client *githubv4.Client, variables map[string]interface{}, branchName string, filePath string, newContent string, message string) {
 	var qOid struct {
 		Repository struct {
 			Object struct {
@@ -185,10 +201,7 @@ func updateFile(client *githubv4.Client, variables map[string]interface{}, branc
 	}
 
 	err := client.Query(context.Background(), &qOid, variables)
-	if err != nil {
-		// Handle error.
-		fmt.Println("Error!! ", err)
-	}
+	handleError(err)
 	oid := qOid.Repository.Object.Oid
 
 	var m struct {
@@ -207,7 +220,7 @@ func updateFile(client *githubv4.Client, variables map[string]interface{}, branc
 			BranchName:              &branch,
 		},
 		Message: githubv4.CommitMessage{
-			Headline: githubv4.String("Updated image tag in " + filePath),
+			Headline: githubv4.String(message),
 		},
 		ExpectedHeadOid: githubv4.GitObjectID(oid),
 		FileChanges: &githubv4.FileChanges{
@@ -219,9 +232,12 @@ func updateFile(client *githubv4.Client, variables map[string]interface{}, branc
 	}
 
 	err = client.Mutate(context.Background(), &m, input, nil)
+	handleError(err)
+}
+
+func handleError(err error) {
 	if err != nil {
-		// Handle error.
-		fmt.Println("Error!! ", err)
+		fmt.Fprintf(os.Stderr, "Error: %v", err)
+		os.Exit(1)
 	}
-	// // fmt.Println(q.Repository.File.Blob.Text)
 }
