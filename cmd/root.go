@@ -28,6 +28,7 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/shurcooL/githubv4"
 	"github.com/spf13/cobra"
@@ -66,6 +67,8 @@ Example:
 		branchName, _ := cmd.Flags().GetString("branch")
 		nth, _ := cmd.Flags().GetInt("nth")
 		message, _ := cmd.Flags().GetString("message")
+		tLabel, _ := cmd.Flags().GetString("timestamp")
+		tNth, _ := cmd.Flags().GetInt("tnth")
 
 		variables := map[string]interface{}{
 			"owner":    githubv4.String(owner),
@@ -82,6 +85,11 @@ Example:
 			content := getFileContent(client, variables)
 
 			newContent := replaceTag(content, label, newTag, nth)
+
+			if tLabel != "" {
+				ts := time.Now().UTC().Format(time.RFC3339)
+				newContent = replaceTag(newContent, tLabel, ts, tNth)
+			}
 
 			delete(variables, "filePath")
 			commitMessage := ""
@@ -117,7 +125,8 @@ func init() {
 	rootCmd.Flags().StringP("message", "m", "", "The commit message for the tag change")
 	rootCmd.Flags().IntP("nth", "n", 1, "The nth occurance of the label to update")
 	rootCmd.Flags().BoolP("testLogin", "", false, "Test GITHUB_TOKEN")
-
+	rootCmd.Flags().StringP("timestamp", "t", "", "Yaml label to update the timestamp tag value")
+	rootCmd.Flags().IntP("tnth", "", 1, "The nth occurance of the timestamp label to update")
 }
 
 func getClient(githubToken string) *githubv4.Client {
