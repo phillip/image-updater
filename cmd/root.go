@@ -205,11 +205,13 @@ func updateFile(client *githubv4.Client, variables map[string]interface{}, branc
 		Repository struct {
 			Object struct {
 				Oid githubv4.String
-			} `graphql:"object(expression:\"main\")"`
+			} `graphql:"object(expression: $branchName)"`
 		} `graphql:"repository(owner: $owner, name: $name)"`
 	}
 
-	err := client.Query(context.Background(), &qOid, variables)
+	vars := variables
+	vars["branchName"] = githubv4.String(branchName)
+	err := client.Query(context.Background(), &qOid, vars)
 	handleError(err)
 	oid := qOid.Repository.Object.Oid
 
